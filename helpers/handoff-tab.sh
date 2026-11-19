@@ -74,6 +74,85 @@ end run
 EOF
 }
 
+# Is a terminal with this id still in Ghostty? Exit 0 = yes, 1 = gone, 2 = could
+# not ask (Ghostty did not answer; treated as "still there" by callers).
+term_exists() { # <terminal-id>
+  local ids
+  ids=$(osascript -e 'tell application "Ghostty" to get id of every terminal' 2>/dev/null) || return 2
+  [[ ", $ids, " == *", $1, "* ]]
+}
+
+# Poll up to <secs> for the terminal to disappear. Exit 0 = gone.
+wait_term_gone() { # <terminal-id> <secs>
+  local end=$(( $(date +%s) + $2 ))
+  while :; do
+    term_exists "$1"; [ $? = 1 ] && return 0
+    [ "$(date +%s)" -ge "$end" ] && return 1
+    sleep 0.5
+  done
+}
+
+# Ask Ghostty to close one terminal, addressed by its unique id (not by window or
+# tab index, which can shift while you move focus). Prints Ghostty's answer.
+send_close() { # <terminal-id>
+  [ -n "${HANDOFF_FAKE_CLOSE_FAIL:-}" ] && { echo "skipped (HANDOFF_FAKE_CLOSE_FAIL)"; return 0; }
+  osascript - "$1" 2>&1 <<'EOF'
+on run argv
+  tell application "Ghostty"
+    close terminal id (item 1 of argv)
+  end tell
+  return "close sent"
+end run
+EOF
+}
+
+has_claude_on() { # <tty path> -> exit 0 if a claude process still runs there
+  ps -t "${1#/dev/}" -o comm= 2>/dev/null | grep -q claude
+}
+
+# Close a terminal and prove it is gone. Ghostty's AppleScript "close" calls
+# closeSurface(withConfirmation: false), so confirm-close-surface never shows a
+# sheet, but the handler returns success even when the surface is not removed
+# (observed with Ghostty 1.4.0: close event received, no sheet, no error, yet
+# the split stayed open until closed by hand). So: close, poll, and if the
+# terminal is still there, retry once, then end Claude with /exit and the shell
+# with exit, so the surface closes because its process ended.
+# Logs every step; logs "closed" only after the id is verified gone.
+# Exit 0 = verified gone, 1 = still open.
+close_term_verified() { # <terminal-id> <label>
+  local id="$1" what="$2" out tty
+  term_exists "$id"
+  if [ $? = 1 ]; then log "close $what $id: already gone"; return 0; fi
+  for attempt in 1 2; do
+    out=$(send_close "$id"); log "close $what $id: attempt $attempt: ghostty said: ${out:-<nothing>}"
+    if wait_term_gone "$id" 5; then log "closed $what $id (verified gone after close attempt $attempt)"; return 0; fi
+    log "close $what $id: still present 5s after close attempt $attempt"
+  done
+  tty=$(osascript - "$id" 2>/dev/null <<'EOF'
+on run argv
+  tell application "Ghostty" to return tty of terminal id (item 1 of argv)
+end run
+EOF
+)
+  log "close $what $id: fallback, typing /exit into it (tty ${tty:-unknown})"
+  type_into_term "$id" "/exit" || log "close $what $id: typing /exit failed"
+  if [ -n "$tty" ]; then
+    local end=$(( $(date +%s) + 15 ))
+    while has_claude_on "$tty" && [ "$(date +%s)" -lt "$end" ]; do sleep 0.5; done
+    if has_claude_on "$tty"; then
+      log "close $what $id: claude still running on $tty 15s after /exit, not typing exit into it"
+    else
+      log "close $what $id: no claude on $tty, typing exit into the shell"
+      wait_term_gone "$id" 2 || type_into_term "$id" "exit" || log "close $what $id: typing exit failed"
+    fi
+  fi
+  if wait_term_gone "$id" 5; then log "closed $what $id (verified gone after /exit fallback)"; return 0; fi
+  out=$(send_close "$id"); log "close $what $id: final close attempt: ghostty said: ${out:-<nothing>}"
+  if wait_term_gone "$id" 5; then log "closed $what $id (verified gone after final close)"; return 0; fi
+  log "NOT CLOSED: $what $id is still open after close x3 and /exit fallback"
+  return 1
+}
+
 if [ "${1:-}" = "--watch" ]; then
   # ---------------- detached watcher ----------------
   OLD_TAB="$2"; NEW_TAB="$3"; OLD_INDEX="$4"; MARKER="$5"; PROJ_DIR="$6"
@@ -95,8 +174,24 @@ if [ "${1:-}" = "--watch" ]; then
     local anchor="$1" out
     while [ "$(date +%s)" -lt "$deadline" ]; do
       if [ -z "$transcript" ]; then
+        # The marker must sit in a real user prompt. Any other session that merely
+        # printed this log (a tool_result quoting the marker) would otherwise be
+        # picked, and the judge would wait on the wrong session until timeout.
         transcript=$(find "$PROJ_DIR" -maxdepth 1 -name '*.jsonl' -newer "$REF" -print0 2>/dev/null \
-          | xargs -0 grep -l -F "$MARKER" 2>/dev/null | head -1)
+          | xargs -0 grep -l -F "$MARKER" 2>/dev/null \
+          | python3 -I -c '
+import json, sys
+marker = sys.argv[1]
+for path in sys.stdin.read().splitlines():
+    for line in open(path, encoding="utf-8", errors="replace"):
+        if marker not in line: continue
+        try: d = json.loads(line)
+        except Exception: continue
+        m = d.get("message") if isinstance(d.get("message"), dict) else {}
+        c = m.get("content", "")
+        if isinstance(c, list) and any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c): continue
+        if d.get("type") == "user" and marker in json.dumps(c): print(path); sys.exit()
+' "$MARKER")
         [ -n "$transcript" ] && log "transcript: $transcript"
       fi
       if [ -n "$transcript" ]; then
@@ -217,24 +312,10 @@ PY
     log "DRY: would close $OLD_TAB"; notify "Dry run OK, would close the old tab."
     rm -f "$CMD_FILE"; cleanup; exit 0
   fi
-  if ! osascript - "$OLD_TAB" >>"$LOG" 2>&1 <<'EOF'
-on run argv
-  tell application "Ghostty"
-    repeat with w in windows
-      repeat with t in tabs of w
-        repeat with term in terminals of t
-          if (id of term) is (item 1 of argv) then
-            close term
-            return "closed old split"
-          end if
-        end repeat
-      end repeat
-    end repeat
-  end tell
-  error "old terminal not found"
-end run
-EOF
-  then log "close failed"; notify "New session is running, but closing the old split failed."; exit 1; fi
+  if ! close_term_verified "$OLD_TAB" "old split"; then
+    notify "New session is running, but the old split would not close. Close it by hand."
+    rm -f "$CMD_FILE"; cleanup; exit 1
+  fi
   rm -f "$CMD_FILE"; cleanup
   exit 0
 fi
@@ -311,9 +392,9 @@ OLD_INDEX="-"
 log "launch: tty=$MY_TTY win=$WIN_ID tab=$TAB_ID old_term=$OLD_TAB new_term=$NEW_TAB (split) cwd=$CWD marker=$MARKER rc=${RC_NAME:-off}"
 
 if [ -n "${HANDOFF_PLACEMENT_TEST:-}" ]; then
-  # Report the tab's terminals, then close the test split again.
+  # Report the tab's terminals, then close the test split again (verified).
   sleep 1
-  osascript - "$TAB_ID" "$NEW_TAB" <<'EOF'
+  osascript - "$TAB_ID" <<'EOF'
 on run argv
   tell application "Ghostty"
     set out to ""
@@ -323,9 +404,6 @@ on run argv
           repeat with term in terminals of t
             set out to out & (id of term) & " tty=" & (tty of term) & linefeed
           end repeat
-          repeat with term in terminals of t
-            if (id of term) is (item 2 of argv) then close term
-          end repeat
         end if
       end repeat
     end repeat
@@ -334,7 +412,8 @@ on run argv
 end run
 EOF
   rm -f "$PFILE" "$CMD_FILE" "$EFILE" "$REF"
-  exit 0
+  if close_term_verified "$NEW_TAB" "test split"; then echo "test split closed (verified)"; exit 0; fi
+  echo "test split NOT closed, see $LOG" >&2; exit 5
 fi
 
 HANDOFF_DRY_CLOSE="${HANDOFF_DRY_CLOSE:-}" nohup "$0" --watch "$OLD_TAB" "$NEW_TAB" "$OLD_INDEX" \

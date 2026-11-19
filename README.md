@@ -51,6 +51,9 @@ Settings:
 | `HANDOFF_RC` | auto | `1`/`0` forces Remote Control on/off for the new session |
 | `HANDOFF_DRY_CLOSE` | unset | run everything but don't close the old split |
 | `HANDOFF_PLACEMENT_TEST` | unset | only open and close a test split |
+| `HANDOFF_FAKE_CLOSE_FAIL` | unset | skip the AppleScript close, to exercise the `/exit` fallback (combine with `HANDOFF_PLACEMENT_TEST`) |
+
+Closing is verified. Ghostty's AppleScript `close` can report success without removing the split, so the watcher polls for up to 5 s until the terminal id is gone and retries once. If the split is still there, it types `/exit` into the old session and then `exit` into its shell, so the split closes because its process ended. The log only says `closed` after the id is confirmed gone; otherwise it says `NOT CLOSED` and you get a notification.
 
 Log: `~/.claude/logs/handoff-tab.log`.
 
