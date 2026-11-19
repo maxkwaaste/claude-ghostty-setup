@@ -58,7 +58,7 @@ Closing is verified. Ghostty's AppleScript `close` can report success without re
 
 Log: `~/.claude/logs/handoff-tab.log`.
 
-Tests: `tests/handoff-paths.sh`, run from inside a Ghostty terminal, drives the helper through all eight paths (normal close, retry + `/exit` fallback, forced `NOT CLOSED`, judge ok, mismatch then ok, mismatch twice, timeout, API error) against real splits and the real judge. It opens and closes its own splits and leaves the clipboard alone.
+Tests: `tests/handoff-paths.sh`, run from inside a Ghostty terminal, drives the helper through all eight paths (normal close, retry + `/exit` fallback, forced `NOT CLOSED`, judge ok, mismatch then ok, mismatch twice, timeout, API error) against real splits and the real judge. It opens and closes its own splits and leaves the clipboard alone. It works from Claude or from a plain shell. Needs Ghostty 1.4.0 or later: 1.3.x has no `tty` on terminals in its AppleScript dictionary, so `/handoff` cannot find its own split there.
 
 ## A warning about bypass mode
 

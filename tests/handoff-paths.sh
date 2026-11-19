@@ -7,7 +7,8 @@
 #   P3 every close fails -> NOT CLOSED P7 no finished turn -> timeout FAIL
 #   P4 judge ok, decoy transcript     P8 API error in the new session -> FAIL
 #
-# Run it from inside a Ghostty terminal (it splits that terminal). It opens and
+# Run it from inside a Ghostty terminal (it splits that terminal), from a plain
+# shell or from Claude. It opens and
 # closes its own splits, never touches the clipboard (HANDOFF_NO_CLIPBOARD) and
 # costs four or five short Sonnet judge calls. Exit 0 = all green.
 set -u
@@ -16,6 +17,14 @@ LOG="$HOME/.claude/logs/handoff-tab.log"
 W=$(mktemp -d "${TMPDIR:-/tmp}/handoff-paths.XXXXXX")
 PASS=0; FAILS=()
 export HANDOFF_NO_CLIPBOARD=1
+mkdir -p "$(dirname "$LOG")"; touch "$LOG"   # a machine that never handed off has no log yet
+# The launcher finds its own split by walking up to a process whose name holds
+# "claude" (normally the Claude session that ran /handoff). Run the placement
+# tests through a symlink to bash with such a name, so the suite also works from
+# a plain shell. (A copy of /bin/bash is killed by code signing; a symlink is not,
+# and ps reports the link's path.)
+SHIM="$W/claude-test-shell"; ln -s /bin/bash "$SHIM"
+place() { "$SHIM" "$H" "$W/p.txt" >/dev/null 2>&1; }
 
 my_tty() { local p=$$ t
   while [ "${p:-1}" -gt 1 ]; do
@@ -76,11 +85,11 @@ watch() { "$H" --watch "$1" "$2" - "${@:3}" >/dev/null 2>&1; }
 
 echo "== placement + close paths"
 printf 'test\n' >"$W/p.txt"
-N=$(wc -l <"$LOG"); HANDOFF_PLACEMENT_TEST=1 "$H" "$W/p.txt" >/dev/null 2>&1
+N=$(wc -l <"$LOG"); HANDOFF_PLACEMENT_TEST=1 place
 has "$N" "(verified gone after close attempt 1)" && ok "P1 normal close" || bad "P1 normal close"
-N=$(wc -l <"$LOG"); HANDOFF_PLACEMENT_TEST=1 HANDOFF_FAKE_CLOSE_FAIL=1 "$H" "$W/p.txt" >/dev/null 2>&1
+N=$(wc -l <"$LOG"); HANDOFF_PLACEMENT_TEST=1 HANDOFF_FAKE_CLOSE_FAIL=1 place
 has "$N" "(verified gone after /exit fallback)" && ok "P2 retry + /exit fallback" || bad "P2 retry + /exit fallback"
-N=$(wc -l <"$LOG"); HANDOFF_PLACEMENT_TEST=1 HANDOFF_FAKE_CLOSE_FAIL=all "$H" "$W/p.txt" >/dev/null 2>&1; rc=$?
+N=$(wc -l <"$LOG"); HANDOFF_PLACEMENT_TEST=1 HANDOFF_FAKE_CLOSE_FAIL=all place; rc=$?
 if [ $rc = 5 ] && has "$N" "NOT CLOSED: test split" && has "$N" "closed test split cleanup"; then ok "P3 NOT CLOSED (exit 5, cleaned up)"; else bad "P3 NOT CLOSED (rc=$rc)"; fi
 
 echo "== judge paths (real Sonnet judge)"
