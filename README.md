@@ -51,11 +51,14 @@ Settings:
 | `HANDOFF_RC` | auto | `1`/`0` forces Remote Control on/off for the new session |
 | `HANDOFF_DRY_CLOSE` | unset | run everything but don't close the old split |
 | `HANDOFF_PLACEMENT_TEST` | unset | only open and close a test split |
-| `HANDOFF_FAKE_CLOSE_FAIL` | unset | skip the AppleScript close, to exercise the `/exit` fallback (combine with `HANDOFF_PLACEMENT_TEST`) |
+| `HANDOFF_FAKE_CLOSE_FAIL` | unset | skip the AppleScript close, to exercise the `/exit` fallback (combine with `HANDOFF_PLACEMENT_TEST`); `all` also skips the fallback, to force `NOT CLOSED` |
+| `HANDOFF_NO_CLIPBOARD` | unset | on failure, log only: no clipboard copy, no notification (for tests) |
 
 Closing is verified. Ghostty's AppleScript `close` can report success without removing the split, so the watcher polls for up to 5 s until the terminal id is gone and retries once. If the split is still there, it types `/exit` into the old session and then `exit` into its shell, so the split closes because its process ended. The log only says `closed` after the id is confirmed gone; otherwise it says `NOT CLOSED` and you get a notification.
 
 Log: `~/.claude/logs/handoff-tab.log`.
+
+Tests: `tests/handoff-paths.sh`, run from inside a Ghostty terminal, drives the helper through all eight paths (normal close, retry + `/exit` fallback, forced `NOT CLOSED`, judge ok, mismatch then ok, mismatch twice, timeout, API error) against real splits and the real judge. It opens and closes its own splits and leaves the clipboard alone.
 
 ## A warning about bypass mode
 
