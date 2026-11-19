@@ -134,8 +134,12 @@ on run argv
 end run
 EOF
 )
-  log "close $what $id: fallback, typing /exit into it (tty ${tty:-unknown})"
-  type_into_term "$id" "/exit" || log "close $what $id: typing /exit failed"
+  if [ "${HANDOFF_FAKE_CLOSE_FAIL:-}" = all ]; then
+    log "close $what $id: fallback skipped (HANDOFF_FAKE_CLOSE_FAIL=all)"; tty=""
+  else
+    log "close $what $id: fallback, typing /exit into it (tty ${tty:-unknown})"
+    type_into_term "$id" "/exit" || log "close $what $id: typing /exit failed"
+  fi
   if [ -n "$tty" ]; then
     local end=$(( $(date +%s) + 15 ))
     while has_claude_on "$tty" && [ "$(date +%s)" -lt "$end" ]; do sleep 0.5; done
@@ -164,8 +168,12 @@ if [ "${1:-}" = "--watch" ]; then
   STATE_DIR=$(dirname "$REF")
   fail() {
     log "FAIL: $1"
-    pbcopy <"$CMD_FILE"
-    notify "Handoff not confirmed: $1. Old tab kept, launch command copied."
+    if [ -n "${HANDOFF_NO_CLIPBOARD:-}" ]; then
+      log "test: clipboard and notification skipped (HANDOFF_NO_CLIPBOARD)"
+    else
+      pbcopy <"$CMD_FILE"
+      notify "Handoff not confirmed: $1. Old tab kept, launch command copied."
+    fi
     exit 1
   }
 
@@ -313,7 +321,7 @@ PY
     rm -f "$CMD_FILE"; cleanup; exit 0
   fi
   if ! close_term_verified "$OLD_TAB" "old split"; then
-    notify "New session is running, but the old split would not close. Close it by hand."
+    [ -n "${HANDOFF_NO_CLIPBOARD:-}" ] || notify "New session is running, but the old split would not close. Close it by hand."
     rm -f "$CMD_FILE"; cleanup; exit 1
   fi
   rm -f "$CMD_FILE"; cleanup
@@ -413,7 +421,13 @@ end run
 EOF
   rm -f "$PFILE" "$CMD_FILE" "$EFILE" "$REF"
   if close_term_verified "$NEW_TAB" "test split"; then echo "test split closed (verified)"; exit 0; fi
-  echo "test split NOT closed, see $LOG" >&2; exit 5
+  echo "test split NOT closed, see $LOG" >&2
+  if [ -n "${HANDOFF_FAKE_CLOSE_FAIL:-}" ]; then
+    # Forced failure: clean the split up for real so the test leaves nothing behind.
+    HANDOFF_FAKE_CLOSE_FAIL="" close_term_verified "$NEW_TAB" "test split cleanup" \
+      && echo "test split cleaned up (verified)" >&2
+  fi
+  exit 5
 fi
 
 HANDOFF_DRY_CLOSE="${HANDOFF_DRY_CLOSE:-}" nohup "$0" --watch "$OLD_TAB" "$NEW_TAB" "$OLD_INDEX" \
